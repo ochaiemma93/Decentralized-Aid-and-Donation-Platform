@@ -64,6 +64,28 @@
   { total: uint }
 )
 
+(define-map organizer-reputation
+  { organizer: principal }
+  {
+    total-campaigns: uint,
+    successful-campaigns: uint,
+    total-raised: uint,
+    completed-milestones: uint,
+    reputation-score: uint,
+    trust-level: uint
+  }
+)
+
+(define-map campaign-outcomes
+  { campaign-id: uint }
+  {
+    is-successful: bool,
+    completion-percentage: uint,
+    milestones-completed: uint,
+    outcome-verified: bool
+  }
+)
+
 (define-read-only (get-campaign (campaign-id uint))
   (map-get? campaigns { campaign-id: campaign-id })
 )
@@ -92,6 +114,14 @@
   (+ (var-get campaign-id-nonce) u1)
 )
 
+(define-read-only (get-organizer-reputation (organizer principal))
+  (map-get? organizer-reputation { organizer: organizer })
+)
+
+(define-read-only (get-campaign-outcome (campaign-id uint))
+  (map-get? campaign-outcomes { campaign-id: campaign-id })
+)
+
 (define-public (create-campaign 
   (title (string-ascii 100))
   (description (string-ascii 500))
@@ -114,6 +144,7 @@
       }
     )
     (var-set campaign-id-nonce new-campaign-id)
+    (unwrap-panic (update-organizer-campaign-count tx-sender))
     (ok new-campaign-id)
   )
 )
@@ -187,6 +218,7 @@
         }
       )
     )
+    (unwrap-panic (update-milestone-reputation (get organizer campaign)))
     (ok true)
   )
 )
@@ -270,4 +302,137 @@
     total-raised: (default-to u0 (get raised-amount (get-campaign campaign-id))),
     query-limit: limit
   })
+)
+
+(define-public (update-organizer-campaign-count (organizer principal))
+  (let ((current-rep (get-organizer-reputation organizer)))
+    (map-set organizer-reputation
+      { organizer: organizer }
+      {
+        total-campaigns: (+ u1 (default-to u0 (get total-campaigns current-rep))),
+        successful-campaigns: (default-to u0 (get successful-campaigns current-rep)),
+        total-raised: (default-to u0 (get total-raised current-rep)),
+        completed-milestones: (default-to u0 (get completed-milestones current-rep)),
+        reputation-score: (default-to u0 (get reputation-score current-rep)),
+        trust-level: (default-to u0 (get trust-level current-rep))
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (update-milestone-reputation (organizer principal))
+  (let ((current-rep (get-organizer-reputation organizer)))
+    (map-set organizer-reputation
+      { organizer: organizer }
+      {
+        total-campaigns: (default-to u0 (get total-campaigns current-rep)),
+        successful-campaigns: (default-to u0 (get successful-campaigns current-rep)),
+        total-raised: (default-to u0 (get total-raised current-rep)),
+        completed-milestones: (+ u1 (default-to u0 (get completed-milestones current-rep))),
+        reputation-score: (calculate-reputation-score organizer),
+        trust-level: (calculate-trust-level organizer)
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (finalize-campaign-outcome (campaign-id uint))
+  (let ((campaign (unwrap! (get-campaign campaign-id) ERR-CAMPAIGN-NOT-FOUND))
+        (organizer (get organizer campaign))
+        (target (get target-amount campaign))
+        (raised (get raised-amount campaign))
+        (completion-percentage (if (> target u0) (/ (* raised u100) target) u0))
+        (is-successful (>= raised (* target u80 (/ u1 u100))))
+        (current-rep (get-organizer-reputation organizer)))
+    (asserts! (is-eq tx-sender organizer) ERR-NOT-AUTHORIZED)
+    (map-set campaign-outcomes
+      { campaign-id: campaign-id }
+      {
+        is-successful: is-successful,
+        completion-percentage: completion-percentage,
+        milestones-completed: (get-campaign-milestone-count campaign-id),
+        outcome-verified: true
+      }
+    )
+    (map-set organizer-reputation
+      { organizer: organizer }
+      {
+        total-campaigns: (default-to u0 (get total-campaigns current-rep)),
+        successful-campaigns: (+ (if is-successful u1 u0) (default-to u0 (get successful-campaigns current-rep))),
+        total-raised: (+ raised (default-to u0 (get total-raised current-rep))),
+        completed-milestones: (default-to u0 (get completed-milestones current-rep)),
+        reputation-score: (calculate-reputation-score organizer),
+        trust-level: (calculate-trust-level organizer)
+      }
+    )
+    (ok is-successful)
+  )
+)
+
+(define-read-only (calculate-reputation-score (organizer principal))
+  (let ((rep (get-organizer-reputation organizer)))
+    (match rep
+      current-rep
+      (let ((total-campaigns (get total-campaigns current-rep))
+            (successful-campaigns (get successful-campaigns current-rep))
+            (completed-milestones (get completed-milestones current-rep)))
+        (if (> total-campaigns u0)
+          (+ (/ (* successful-campaigns u60) total-campaigns)
+             (if (< (* completed-milestones u5) u40) (* completed-milestones u5) u40))
+          u0
+        )
+      )
+      u0
+    )
+  )
+)
+
+(define-read-only (calculate-trust-level (organizer principal))
+  (let ((score (calculate-reputation-score organizer)))
+    (if (>= score u90) u5
+      (if (>= score u75) u4
+        (if (>= score u60) u3
+          (if (>= score u40) u2
+            (if (>= score u20) u1 u0)
+          )
+        )
+      )
+    )
+  )
+)
+
+(define-read-only (get-organizer-trust-metrics (organizer principal))
+  (let ((rep (get-organizer-reputation organizer)))
+    (match rep
+      current-rep
+      (ok {
+        organizer: organizer,
+        total-campaigns: (get total-campaigns current-rep),
+        successful-campaigns: (get successful-campaigns current-rep),
+        success-rate: (if (> (get total-campaigns current-rep) u0)
+                        (/ (* (get successful-campaigns current-rep) u100) (get total-campaigns current-rep))
+                        u0),
+        total-raised: (get total-raised current-rep),
+        completed-milestones: (get completed-milestones current-rep),
+        reputation-score: (get reputation-score current-rep),
+        trust-level: (get trust-level current-rep)
+      })
+      (ok {
+        organizer: organizer,
+        total-campaigns: u0,
+        successful-campaigns: u0,
+        success-rate: u0,
+        total-raised: u0,
+        completed-milestones: u0,
+        reputation-score: u0,
+        trust-level: u0
+      })
+    )
+  )
+)
+
+(define-read-only (is-trusted-organizer (organizer principal))
+  (>= (calculate-trust-level organizer) u3)
 )
