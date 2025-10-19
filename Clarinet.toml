@@ -1,0 +1,28 @@
+[project]
+name = 'Aid-and-Donation-Platform'
+description = ''
+authors = []
+telemetry = true
+cache_dir = '.\.cache'
+requirements = []
+[contracts.Aid-and-Donation-Platform]
+path = 'contracts/Aid-and-Donation-Platform.clar'
+clarity_version = 3
+epoch = 'latest'
+[repl.analysis]
+passes = ['check_checker']
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
+
+[repl.remote_data]
+enabled = false
+api_url = 'https://api.hiro.so'
+
+[contracts.allowlist]
+path = 'contracts/allowlist.clar'
+clarity_version = 3
+epoch = 'latest'
