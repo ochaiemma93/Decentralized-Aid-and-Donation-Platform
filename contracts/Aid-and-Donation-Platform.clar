@@ -6,6 +6,10 @@
 (define-constant ERR-ALREADY-EXISTS (err u409))
 (define-constant ERR-MILESTONE-NOT-FOUND (err u406))
 (define-constant ERR-MILESTONE-COMPLETED (err u407))
+(define-constant ERR-NO-ESCROW (err u408))
+(define-constant ERR-REFUND-NOT-ELIGIBLE (err u410))
+(define-constant ERR-EXCEEDS-ESCROW (err u412))
+(define-constant REFUND-WINDOW-BLOCKS u28800)
 
 (define-data-var campaign-id-nonce uint u0)
 (define-data-var transaction-id-nonce uint u0)
@@ -84,6 +88,19 @@
     milestones-completed: uint,
     outcome-verified: bool
   }
+)
+
+(define-map escrow-donations
+  { campaign-id: uint, donor: principal }
+  {
+    amount: uint,
+    timestamp: uint
+  }
+)
+
+(define-map escrow-total
+  { campaign-id: uint }
+  { total: uint }
 )
 
 (define-read-only (get-campaign (campaign-id uint))
@@ -435,4 +452,96 @@
 
 (define-read-only (is-trusted-organizer (organizer principal))
   (>= (calculate-trust-level organizer) u3)
+)
+
+(define-read-only (contract-principal)
+  (as-contract tx-sender)
+)
+
+(define-read-only (get-escrowed-amount (donor principal) (campaign-id uint))
+  (default-to u0 (get amount (map-get? escrow-donations { campaign-id: campaign-id, donor: donor })))
+)
+
+(define-read-only (get-escrow-total (campaign-id uint))
+  (default-to u0 (get total (map-get? escrow-total { campaign-id: campaign-id })))
+)
+
+(define-read-only (is-refund-eligible (campaign-id uint))
+  (match (get-campaign campaign-id)
+    campaign
+    (let ((deadline (+ (get created-at campaign) REFUND-WINDOW-BLOCKS))
+          (outcome (map-get? campaign-outcomes { campaign-id: campaign-id }))
+          (outcome-failed (match outcome
+                            data
+                            (and (get outcome-verified data) (not (get is-successful data)))
+                            false)))
+      (or (not (get is-active campaign))
+          outcome-failed
+          (and (>= stacks-block-height deadline)
+               (< (get raised-amount campaign) (get target-amount campaign))))
+    )
+    false
+  )
+)
+
+(define-public (donate-escrow (campaign-id uint) (amount uint))
+  (let ((campaign (unwrap! (get-campaign campaign-id) ERR-CAMPAIGN-NOT-FOUND))
+        (prev (map-get? escrow-donations { campaign-id: campaign-id, donor: tx-sender }))
+        (prev-amt (default-to u0 (get amount prev)))
+        (recipient (contract-principal))
+        (total-row (map-get? escrow-total { campaign-id: campaign-id }))
+        (total-prev (default-to u0 (get total total-row))))
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (get is-active campaign) ERR-CAMPAIGN-INACTIVE)
+    (try! (stx-transfer? amount tx-sender recipient))
+    (map-set escrow-donations { campaign-id: campaign-id, donor: tx-sender }
+      { amount: (+ prev-amt amount), timestamp: stacks-block-height })
+    (map-set escrow-total { campaign-id: campaign-id } { total: (+ total-prev amount) })
+    (ok (+ prev-amt amount))
+  )
+)
+
+(define-public (claim-escrow-refund (campaign-id uint))
+  (let ((record (map-get? escrow-donations { campaign-id: campaign-id, donor: tx-sender }))
+        (amount (default-to u0 (get amount record)))
+        (eligible (is-refund-eligible campaign-id))
+        (total-row (map-get? escrow-total { campaign-id: campaign-id }))
+        (total-prev (default-to u0 (get total total-row)))
+        (sender (contract-principal)))
+    (asserts! (> amount u0) ERR-NO-ESCROW)
+    (asserts! eligible ERR-REFUND-NOT-ELIGIBLE)
+    (try! (as-contract (stx-transfer? amount sender tx-sender)))
+    (map-set escrow-donations { campaign-id: campaign-id, donor: tx-sender }
+      { amount: u0, timestamp: stacks-block-height })
+    (map-set escrow-total { campaign-id: campaign-id }
+      { total: (if (> total-prev amount) (- total-prev amount) u0) })
+    (ok amount)
+  )
+)
+
+(define-public (convert-escrow-to-donation (campaign-id uint) (amount uint))
+  (let ((campaign (unwrap! (get-campaign campaign-id) ERR-CAMPAIGN-NOT-FOUND))
+        (record (map-get? escrow-donations { campaign-id: campaign-id, donor: tx-sender }))
+        (escrowed (default-to u0 (get amount record)))
+        (sender (contract-principal))
+        (organizer (get organizer campaign))
+        (total-row (map-get? escrow-total { campaign-id: campaign-id }))
+        (total-prev (default-to u0 (get total total-row)))
+        (prior-donation (map-get? donations { donor: tx-sender, campaign-id: campaign-id }))
+        (prior-amt (default-to u0 (get amount prior-donation))))
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (>= escrowed amount) ERR-INSUFFICIENT-FUNDS)
+    (try! (as-contract (stx-transfer? amount sender organizer)))
+    (map-set escrow-donations { campaign-id: campaign-id, donor: tx-sender }
+      { amount: (- escrowed amount), timestamp: stacks-block-height })
+    (map-set escrow-total { campaign-id: campaign-id }
+      { total: (if (> total-prev amount) (- total-prev amount) u0) })
+    (map-set campaigns { campaign-id: campaign-id }
+      (merge campaign { raised-amount: (+ (get raised-amount campaign) amount) }))
+    (map-set donations { donor: tx-sender, campaign-id: campaign-id }
+      { amount: (+ amount prior-amt), timestamp: stacks-block-height })
+    (map-set donor-total-donations { donor: tx-sender }
+      { total: (+ amount (get-donor-total tx-sender)) })
+    (ok amount)
+  )
 )

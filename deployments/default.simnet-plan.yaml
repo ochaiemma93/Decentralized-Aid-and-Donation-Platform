@@ -66,11 +66,11 @@ plan:
         - emulated-contract-publish:
             contract-name: Aid-and-Donation-Platform
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            path: contracts/Aid-and-Donation-Platform.clar
+            path: "contracts\\Aid-and-Donation-Platform.clar"
             clarity-version: 3
         - emulated-contract-publish:
             contract-name: allowlist
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            path: contracts/allowlist.clar
+            path: "contracts\\allowlist.clar"
             clarity-version: 3
       epoch: "3.2"
